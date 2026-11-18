@@ -1,0 +1,801 @@
+---
+title: 'Fulbright Machine Learning Project'
+author: "Dr. Chukwuebuka Ogwo"
+date: "5/20/2026"
+output:
+  
+---
+
+```{r setup, include=FALSE}
+#install.packages("tableone")
+#install.packages("xgboost")
+#install.packages("doParallel")
+library(magrittr)
+library(recipes)
+library(MachineShop)
+library(gbm)
+library(xgboost)
+library(doParallel)
+## Allocate cores for parallel processing
+registerDoParallel(cores = 6)
+```
+
+
+##Loading data
+```{r}
+## Load data and libraries
+setwd("/Users/user/OneDrive - Harvard University/FulBright/FulBright project")
+#setwd("/Users/cho379/OneDrive - Harvard University/FulBright/FulBright project")
+
+SBBrazil_perio<- read.csv("SBBrazil_FB2.csv")
+#SBBrazil_perio 
+
+
+```
+
+
+```{r}
+
+SBBrazil_perio$codigo<- as.character(SBBrazil_perio$codigo)
+
+SBBrazil_perio0<- SBBrazil_perio[c(1,3,4,6:16)]
+
+SBBrazil_perio1<- SBBrazil_perio[c(1,2,5)]
+
+```
+
+
+##Recoding to appropriate variable type
+```{r}
+
+##convert the numeric variables to factor
+SBBrazil_perio0[sapply(SBBrazil_perio0, is.numeric)] <- lapply(SBBrazil_perio0[sapply(SBBrazil_perio0, is.numeric)], as.factor)
+
+#SBBrazil_perio0
+
+names(SBBrazil_perio0)
+```
+
+
+```{r}
+SBBrazil_perio<- merge(SBBrazil_perio1,SBBrazil_perio0, by = "codigo")
+#SBBrazil_perio
+
+```
+
+##Descriptive statistics for Caries
+```{r}
+library(tableone)
+
+#VARS <- c("internet","agua","sexo","cor_raca","escolaridade","utilizacao_servico","tipo_servico_utilizado", "motivo_consulta", "autoavaliacao_sb","smcat","carie")
+
+VARS <- c("Internet_access","Water_supply","Sex","Race","Education","Dental_service_use","Type_of_service_used", "Reason_for_dental_visit", "Self_rated_oral_health","Minimum_wage_category","Caries_Status")
+
+#(Age,Household_members, Internet_access, Water_supply, Sex, Race, Education, Dental_service_use, Type_of_service_used, Reason_for_dental_visit, Self-rated_oral_health, Minimum_wage_category, Periodontal_disease_status, Caries_Status, OHRQoL)
+
+Table1_perio <- CreateTableOne(vars = VARS, 
+                         strata = "Periodontal_disease_status", 
+                         data = SBBrazil_perio, 
+                         factorVars = VARS)
+
+print(Table1_perio, showAllLevels = TRUE)
+```
+
+
+```{r}
+summary(SBBrazil_perio$Age)
+summary(SBBrazil_perio$Household_members)
+
+t.test(Age~Periodontal_disease_status, data = SBBrazil_perio)
+t.test(Household_members~Periodontal_disease_status, data = SBBrazil_perio)
+```
+
+
+##### DATA PREPROCESSING FOR CARIES OUTCOME ######
+
+```{r}
+## Dataset splitting
+library(rsample)
+
+set.seed(123)
+
+SB_split1 <- initial_split(
+  SBBrazil_perio,
+  prop = 0.80,
+  strata = Periodontal_disease_status
+)
+
+P_trainset <- training(SB_split1)
+P_testset  <- testing(SB_split1)
+```
+
+```{r}
+### Data preprocessing using recipes package for caries
+
+Perio_recipe <- recipe(Periodontal_disease_status ~ .,data = P_trainset) %>%
+    role_case(stratum = Periodontal_disease_status) %>%
+    step_rm(codigo,OHRQoL )%>%
+    check_missing(Periodontal_disease_status) %>%
+    step_filter_missing(all_predictors(),threshold = 0.50) %>%
+    step_nzv(all_predictors()) %>%
+    step_impute_knn(all_predictors())%>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_corr(all_numeric_predictors(), threshold = 0.9) %>%
+    step_normalize(all_numeric_predictors())
+    
+
+##prep the recipe
+    Perioprep <- prep(Perio_recipe, training = P_trainset)
+    #Carieprep
+##Bake the prepped recipes for both trainset and testset
+    Perio_baked_train <- bake(Perioprep, new_data = P_trainset)
+    Perio_baked_test  <- bake(Perioprep, new_data = P_testset)
+
+Perio_baked_train
+Perio_baked_test
+
+```
+
+####CROSSVALIDATION  AND TUNNING#####
+
+```{r}
+##cross validation
+Control <- CVControl(folds = 5, seed = 123)
+```
+
+                ########################### LOGISTIC REGRESSION ##########################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL<- TunedModel(GLMModel(family = binomial), control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+P_LOGFit <- fit(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL)
+
+P_LOGres <- resample(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL, control = Control)
+
+#summary(P_LOGFit)
+#summary(P_LOGres)
+```
+
+##### LOGISTIC REGRESSION RESAMPLE  ######
+```{r}
+P_perf_res_log <- performance(
+  P_LOGres,
+  metrics = c(
+    "ROC AUC"     = "roc_auc",
+    "PR AUC"      = "pr_auc",
+    "Brier Score" = "brier",
+    "Accuracy"    = "accuracy",
+    "Sensitivity" = "sensitivity",
+    "Specificity" = "specificity",
+    "PPV"         = "ppv",
+    "NPV"         = "npv",
+    "F1"          = "f_score"
+  )
+)
+
+#summary(P_perf_res_log)
+```
+
+##### LOGISTIC REGRESSION PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+#### Evaluate on the untouched 50% test set
+
+# Observed test outcomes
+obs_test <- response(P_LOGFit,newdata = Perio_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test <- predict(P_LOGFit,newdata = Perio_baked_test,type = "prob")
+#pred_test
+
+# Predicted classes using the default cutoff of 0.50
+class_test <- predict(P_LOGFit,newdata = Perio_baked_test,cutoff  = 0.50)
+#class_test
+
+# Test-set metrics
+test_performance <- performance(obs_test,pred_test,
+  metrics = c(
+    "ROC AUC"     = "roc_auc",
+    "PR AUC"      = "pr_auc",
+    "Brier Score" = "brier",
+    "Accuracy"    = "accuracy",
+    "Sensitivity" = "sensitivity",
+    "Specificity" = "specificity",
+    "PPV"         = "ppv",
+    "NPV"         = "npv",
+    "F1"          = "f_score"
+    ),
+  cutoff = 0.50)
+
+test_performance
+
+# Test-set confusion matrix
+table(Observed  = obs_test,Predicted = class_test)
+
+```
+
+#################################### SHRINKAGE METHOD ######################################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL1<- TunedModel(GLMNetModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+P_SMFit <- fit(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL1)
+
+P_SMres <- resample(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL1, control = Control)
+
+#summary(P_SMFit)
+#summary(P_SMres)
+
+```
+
+##### SHRINKAGE METHOD RESAMPLE  ######
+```{r}
+P_perf_res_SM <- performance(
+  P_SMres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  )
+)
+
+#summary(P_perf_res_SM)
+```
+
+##### SHRINKAGE METHOD PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+
+#### Evaluate on the untouched 50% test set
+
+
+# Observed test outcomes
+obs_test1 <- response(P_SMFit,newdata = Perio_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test1 <- predict(P_SMFit,newdata = Perio_baked_test,type = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test1 <- predict(P_SMFit,newdata = Perio_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance1 <- performance(obs_test1,pred_test1,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance1
+
+# Test-set confusion matrix
+table(Observed  = obs_test1,Predicted = class_test1)
+
+```
+
+                ########################### GRADIENT BOOSTING MACHINE ######################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL2<- TunedModel(GBMModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+P_GBFit <- fit(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL2)
+
+P_GBres <- resample(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL2, control = Control)
+
+#summary(P_GBFit)
+#summary(P_GBres)
+```
+
+##### GRADIENT BOOSTING RESAMPLE  ######
+```{r}
+P_perf_res_GB <- performance(
+  P_GBres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  ),cutoff = 0.50
+)
+
+#summary(P_perf_res_GB)
+```
+
+##### GRADIENT BOOSTING PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+#### Evaluate on the untouched 20% test set
+
+# Observed test outcomes
+obs_test2 <- response(P_GBFit,newdata = Perio_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test2 <- predict(P_GBFit,newdata = Perio_baked_test,type  = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test2 <- predict(P_GBFit,newdata = Perio_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance2 <- performance(obs_test2,pred_test2,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance2
+
+# Test-set confusion matrix
+table(Observed  = obs_test2,Predicted = class_test2)
+
+```
+
+                ######################## XGBOOST ###################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL3<- TunedModel(XGBLinearModel(objective="binary:logistic"), control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+P_XGBFit <- fit(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL3)
+
+P_XGBres <- resample(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL3, control = Control)
+
+#summary(P_XGBres)
+#summary(P_XGBFit)
+```
+
+
+##### XGBOOST RESAMPLE  ######
+```{r}
+P_perf_res_XGB <- performance(
+  P_XGBres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  ),cutoff = 0.50
+)
+
+#summary(P_perf_res_XGB)
+```
+
+##### XGBOOST PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+
+#### Evaluate on the untouched 50% test set
+
+# Observed test outcomes
+obs_test3 <- response(P_XGBFit,newdata = Perio_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test3 <- predict(P_XGBFit,newdata = Perio_baked_test,type  = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test3 <- predict(P_XGBFit,newdata = Perio_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance3 <- performance(obs_test3,pred_test3,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance3
+
+# Test-set confusion matrix
+table(Observed  = obs_test3,Predicted = class_test3)
+
+```
+
+        #####################################  RANDOM FOREST  ############################
+        
+        
+```{r}
+##Model tunning
+set.seed(123)
+MODEL4<- TunedModel(RandomForestModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+P_RANDFit <- fit(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL4)
+
+P_RANDres <- resample(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL4, control = Control)
+
+#summary(P_RANDFit)
+#summary(P_RANDres)
+```
+
+##### RANDOM FOREST RESAMPLE 
+```{r}
+P_perf_res_RAND <- performance(
+  P_RANDres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  )
+)
+
+#summary(P_perf_res_RAND)
+```
+
+##### RANDOM FOREST PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+#### Evaluate on the untouched 50% test set
+
+# Observed test outcomes
+obs_test4 <- response(P_RANDFit,newdata = Perio_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test4 <- predict(P_RANDFit,newdata = Perio_baked_test,type    = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test4 <- predict(P_RANDFit,newdata = Perio_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance4 <- performance(obs_test4,pred_test4,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance4
+
+# Test-set confusion matrix
+table(Observed  = obs_test4,Predicted = class_test4)
+
+```
+
+
+
+   ################################# Neural Net (Single layer)#########################
+
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL5<- TunedModel(NNetModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+P_NNETFit <- fit(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL5)
+
+P_NNETres <- resample(Periodontal_disease_status ~ .,data = Perio_baked_train, model = MODEL5, control = Control)
+
+#summary(P_NNETres)
+#summary(P_NNETFit)
+```
+
+####NEURAL NETWORK RESAMPLE
+```{r}
+P_perf_res_NNET <- performance(
+  P_NNETres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  )
+)
+
+#summary(P_perf_res_NNET)
+```
+
+## NEURAL NETWORK PERFORMANCE ASSESSMENT ON TESTSET
+```{r }
+
+#### Evaluate on the untouched 50% test set
+
+# Observed test outcomes
+obs_test5 <- response(P_NNETFit,newdata = Perio_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test5 <- predict(P_NNETFit,newdata = Perio_baked_test,type = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test5 <- predict(P_NNETFit,newdata = Perio_baked_test,cutoff = 0.50)
+
+# Test-set metrics
+test_performance5 <- performance(obs_test5,pred_test5,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance5
+
+# Test-set confusion matrix
+table(Observed  = obs_test5,Predicted = class_test5)
+
+```
+
+
+```{r}
+##Variable importance 
+SB_Perio<- varimp(P_GBFit)
+View(SB_Perio)
+plot(SB_Perio)
+```
+
+
+
+```{r}
+##calibration
+calibrate.plot(obs_test2, pred_test2)
+```
+```{r}
+#install.packages("shapviz")
+#install.packages("fastshap",repos = c("https://bgreenwell.r-universe.dev", "https://cloud.r-project.org"))
+
+
+library(fastshap)
+library(shapviz)
+library(dplyr)
+library(ggplot2)
+```
+
+
+##Assign category
+```{r}
+levels(Perio_baked_train$Periodontal_disease_status)
+
+positive_class <- "YES"
+```
+
+
+##Remove outcome variable from the trainset
+```{r}
+X_train_GB <- Perio_baked_train %>%
+  select(-Periodontal_disease_status)
+
+X_test_GB <- Perio_baked_test %>%
+  select(-Periodontal_disease_status)
+```
+
+##create a wrapper for prediction
+```{r}
+pred_wrapper_GB <- function(object, newdata) {
+  
+  pred <- predict(
+    object,
+    newdata = newdata,
+    type = "prob"
+  )
+  
+  # If predict() returns a matrix/data frame of probabilities
+  if (is.matrix(pred) || is.data.frame(pred)) {
+    
+    pred <- as.data.frame(pred)
+    
+    # Use YES column if it exists
+    if ("YES" %in% names(pred)) {
+      return(as.numeric(pred[["YES"]]))
+    }
+    
+    # Otherwise use probability for second factor level
+    return(as.numeric(pred[[2]]))
+  }
+  
+  # If MachineShop already returns probability of second level
+  return(as.numeric(pred))
+}
+```
+
+##create a wrapper for the fitted model
+```{r}
+pred_wrapper_GB(
+  P_GBFit,
+  X_test_GB[1:10, , drop = FALSE]
+)
+```
+
+##Create the SHAP framework using test performance of the best model
+```{r}
+set.seed(123)
+
+n_shap <- min(1000, nrow(X_test_GB))
+
+shap_index <- sample(
+  seq_len(nrow(X_test_GB)),
+  size = n_shap,
+  replace = FALSE
+)
+
+X_explain_GB <- X_test_GB[
+  shap_index,
+  ,
+  drop = FALSE
+]
+```
+
+##Conduct the SHAP analysis --- explainable AI
+
+```{r}
+set.seed(123)
+
+SHAP_GB <- fastshap::explain(
+  object = P_GBFit,
+  X = X_train_GB,
+  newdata = X_explain_GB,
+  pred_wrapper = pred_wrapper_GB,
+  nsim = 200,
+  adjust = TRUE
+)
+```
+
+
+```{r}
+SHAP_GB_matrix <- as.matrix(SHAP_GB)
+
+SHAP_GB_viz <- shapviz(
+  SHAP_GB_matrix,
+  X = X_explain_GB
+)
+```
+
+##Create a beeswarm plot for variable importance based on the SHAP value
+```{r}
+sv_importance(
+  SHAP_GB_viz,
+  kind = "beeswarm",
+  max_display = 20
+)
+```
+
+##Export and save the beeswarm plot 
+```{r}
+SHAP_beeswarm_GB <- sv_importance(
+  SHAP_GB_viz,
+  kind = "beeswarm",
+  max_display = 20
+)
+
+ggsave(
+  "GB_SHAP_Beeswarm.png",
+  plot = SHAP_beeswarm_GB,
+  width = 9,
+  height = 7,
+  dpi = 600
+)
+```
+
+##Create a variable importance plot on a bar chart based on the SHAP value
+```{r}
+sv_importance(
+  SHAP_GB_viz,
+  kind = "bar",
+  max_display = 20
+)
+
+
+
+##save it
+SHAP_bar_GB <- sv_importance(
+  SHAP_GB_viz,
+  kind = "bar",
+  max_display = 20
+)
+
+ggsave(
+  "GB_SHAP_Global_Importance.png",
+  plot = SHAP_bar_GB,
+  width = 8,
+  height = 7,
+  dpi = 600
+)
+```
+
+
+
+```{r}
+SHAP_importance_GB <- data.frame(
+  Variable = colnames(SHAP_GB_matrix),
+  Mean_Absolute_SHAP = apply(
+    abs(SHAP_GB_matrix),
+    2,
+    mean,
+    na.rm = TRUE
+  )
+) %>%
+  arrange(desc(Mean_Absolute_SHAP))
+
+SHAP_importance_GB
+```
+

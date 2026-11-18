@@ -1,0 +1,841 @@
+---
+title: 'Fulbright Machine Learning Project'
+author: "Dr. Chukwuebuka Ogwo"
+date: "11/04/2026"
+output:
+  
+---
+
+```{r setup, include=FALSE}
+#install.packages("tableone")
+#install.packages("xgboost")
+#install.packages("doParallel")
+library(magrittr)
+library(recipes)
+library(MachineShop)
+library(gbm)
+library(xgboost)
+library(doParallel)
+## Allocate cores for parallel processing
+registerDoParallel(cores = 6)
+```
+
+
+##Loading data
+```{r}
+## Load data and libraries
+setwd("/Users/user/OneDrive - Harvard University/FulBright/FulBright project")
+#setwd("/Users/cho379/OneDrive - Harvard University/FulBright/FulBright project")
+
+SBBrazil_OHQ<- read.csv("SBBrazil_FB2.csv")
+#SBBrazil_OHQ
+
+```
+
+
+
+
+```{r}
+
+#################### K-Means Clustering ####################
+
+## Extract OHRQoL for k-means clustering of samples
+OHQ_CL<- (SBBrazil_OHQ [, 16])
+#OHQ_CL
+
+## Load the cluster package
+library(cluster)
+
+## Group samples into 2 clusters
+set.seed(123)
+
+
+fit2 <- kmeans(
+  x = OHQ_CL,
+  centers = 2,
+  nstart = 100,
+  iter.max = 100
+)
+
+fit2$betweenss/fit2$totss
+fit2$tot.withinss
+
+#fit2$cluster
+#table(fit2$cluster)
+
+```
+
+
+```{r}
+SB_clustered <- SBBrazil_OHQ %>%
+  mutate(
+    cluster = factor(fit2$cluster)
+  )
+
+
+#write.csv(SB_clustered,"OHQ_CL.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+
+#setwd("/Users/cho379/OneDrive - Harvard University/FulBright/FulBright project")
+setwd("/Users/user/OneDrive - Harvard University/FulBright/FulBright project")
+New_OHQ<- read.csv("OHQ_CL.csv")
+New_OHQ$codigo<-as.character(New_OHQ$codigo)
+#New_OHQ
+
+```
+
+
+```{r}
+
+New_OHQ$codigo<- as.character(New_OHQ$codigo)
+
+New_OHQ0<- New_OHQ[c(1,3,4,6:17)]
+
+New_OHQ1<- New_OHQ[c(1,2,5)]
+
+
+##convert the numeric variables to factor
+New_OHQ0[sapply(New_OHQ0, is.numeric)] <- lapply(New_OHQ0[sapply(New_OHQ0, is.numeric)], as.factor)
+
+
+
+New_OHQ<- merge(New_OHQ1,New_OHQ0, by = "codigo")
+
+#New_OHQ
+#table(New_OHQ$cluster)
+```
+
+
+##Descriptive statistics for OHRQoL
+```{r}
+library(tableone)
+
+#VARS <- c("pessoas_dom","internet","agua","sexo","cor_raca","escolaridade","utilizacao_servico","tipo_servico_utilizado", "motivo_consulta", "autoavaliacao_sb","smcat","PD_BOP_FINAL", "carie")
+
+VARS <- c("Internet_access","Water_supply","Sex","Race","Education","Dental_service_use","Type_of_service_used", "Reason_for_dental_visit", "Self_rated_oral_health","Minimum_wage_category", "Periodontal_disease_status","Caries_Status")
+
+#(Age,Household_members, Internet_access, Water_supply, Sex, Race, Education, Dental_service_use, Type_of_service_used, Reason_for_dental_visit, Self-rated_oral_health, Minimum_wage_category, Periodontal_disease_status, Caries_Status, OHRQoL)
+
+table1 <- CreateTableOne(vars = VARS, 
+                         strata = "cluster", 
+                         data = New_OHQ, 
+                         factorVars = VARS)
+
+print(table1, showAllLevels = TRUE)
+```
+
+```{r}
+summary(New_OHQ$Age)
+summary(New_OHQ$Household_members)
+
+t.test(Age~cluster, New_OHQ)
+t.test(Household_members~cluster, New_OHQ)
+```
+
+
+
+##### DATA PREPROCESSING FOR OHRQOL OUTCOME ######
+
+```{r}
+## Dataset splitting
+library(rsample)
+
+set.seed(123)
+
+OHQ_split <- initial_split(
+  New_OHQ,
+  prop = 0.80,
+  strata = cluster
+)
+
+O_trainset <- training(OHQ_split)
+O_testset  <- testing(OHQ_split)
+```
+
+```{r}
+### Data preprocessing using recipes package for caries
+
+OHQ_recipe <- recipe(cluster ~ .,data = O_trainset) %>%
+    role_case(stratum = cluster) %>%
+    step_rm(codigo,OHRQoL)%>%
+    check_missing(cluster) %>%
+    step_filter_missing(all_predictors(),threshold = 0.50) %>%
+    step_nzv(all_predictors()) %>%
+    step_impute_knn(all_predictors())%>%
+    step_dummy(all_nominal_predictors()) %>%
+    step_corr(all_numeric_predictors(), threshold = 0.9) %>%
+    step_normalize(all_numeric_predictors())
+    
+
+##prep the recipe
+    OHQprep <- prep(OHQ_recipe, training = O_trainset)
+    #OHQprep
+##Bake the prepped recipes for both trainset and testset
+    OHQ_baked_train <- bake(OHQprep, new_data = O_trainset)
+    OHQ_baked_test  <- bake(OHQprep, new_data = O_testset)
+
+#OHQ_baked_train
+#OHQ_baked_test
+
+```
+
+####CROSSVALIDATION  AND TUNNING#####
+
+```{r}
+##crossvalidation
+Control <- CVControl(folds = 5, seed = 123)
+```
+
+                ###########################Logistic regression##########################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL<- TunedModel(GLMModel(family = binomial), control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+O_LOGFit <- fit(cluster ~ .,data = OHQ_baked_train, model = MODEL)
+
+O_LOGres <- resample(cluster ~ .,data = OHQ_baked_train, model = MODEL, control = Control)
+
+#summary(O_LOGFit)
+#summary(O_LOGres)
+```
+
+##### RESAMPLE  ######
+```{r}
+O_perf_res_log <- performance(
+  O_LOGres,
+  metrics = c(
+    "ROC AUC"     = "roc_auc",
+    "PR AUC"      = "pr_auc",
+    "Brier Score" = "brier",
+    "Accuracy"    = "accuracy",
+    "Sensitivity" = "sensitivity",
+    "Specificity" = "specificity",
+    "PPV"         = "ppv",
+    "NPV"         = "npv",
+    "F1"          = "f_score"
+  )
+)
+
+#summary(O_perf_res_log)
+```
+
+##### PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+#### Evaluate on the untouched 50% test set
+
+# Observed test outcomes
+obs_test <- response(O_LOGFit,newdata = OHQ_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test <- predict(O_LOGFit,newdata = OHQ_baked_test,type = "prob")
+#pred_test
+
+# Predicted classes using the default cutoff of 0.50
+class_test <- predict(O_LOGFit,newdata = OHQ_baked_test,cutoff  = 0.50)
+#class_test
+
+# Test-set metrics
+test_performance <- performance(obs_test,pred_test,
+  metrics = c(
+    "ROC AUC"     = "roc_auc",
+    "PR AUC"      = "pr_auc",
+    "Brier Score" = "brier",
+    "Accuracy"    = "accuracy",
+    "Sensitivity" = "sensitivity",
+    "Specificity" = "specificity",
+    "PPV"         = "ppv",
+    "NPV"         = "npv",
+    "F1"          = "f_score"
+    ),
+  cutoff = 0.50)
+
+test_performance
+
+# Test-set confusion matrix
+table(Observed  = obs_test,Predicted = class_test)
+
+```
+
+
+
+#################################### SHRINKAGE METHOD ######################################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL1<- TunedModel(GLMNetModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+O_SMFit <- fit(cluster ~ .,data = OHQ_baked_train, model = MODEL1)
+
+O_SMres <- resample(cluster ~ .,data = OHQ_baked_train, model = MODEL1, control = Control)
+
+#summary(O_SMFit)
+#summary(O_SMres)
+
+```
+
+##### RESAMPLE  ######
+```{r}
+O_perf_res_SM <- performance(
+  O_SMres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  )
+)
+
+#summary(O_perf_res_SM)
+```
+
+#####PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+
+#### Evaluate on the untouched 50% test set
+
+
+# Observed test outcomes
+obs_test1 <- response(O_SMFit,newdata = OHQ_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test1 <- predict(O_SMFit,newdata = OHQ_baked_test,type = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test1 <- predict(O_SMFit,newdata = OHQ_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance1 <- performance(obs_test1,pred_test1,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance1
+
+# Test-set confusion matrix
+table(Observed  = obs_test1,Predicted = class_test1)
+
+```
+
+                ########################### Gradient Boosting Machine ######################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL2<- TunedModel(GBMModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+O_GBFit <- fit(cluster ~ .,data = OHQ_baked_train, model = MODEL2)
+
+O_GBres <- resample(cluster ~ .,data = OHQ_baked_train, model = MODEL2, control = Control)
+
+#summary(O_GBFit)
+#summary(O_GBres)
+```
+
+##### RESAMPLE  ######
+```{r}
+O_perf_res_GB <- performance(
+  O_GBres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  ),cutoff = 0.50
+)
+
+#summary(O_perf_res_GB)
+```
+
+#####PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+
+#### Evaluate on the untouched 20% test set
+
+# Observed test outcomes
+obs_test2 <- response(O_GBFit,newdata = OHQ_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test2 <- predict(O_GBFit,newdata = OHQ_baked_test,type  = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test2 <- predict(O_GBFit,newdata = OHQ_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance2 <- performance(obs_test2,pred_test2,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance2
+
+# Test-set confusion matrix
+table(Observed  = obs_test2,Predicted = class_test2)
+
+```
+
+                ######################## XGBOOST ###################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL3<- TunedModel(XGBLinearModel(objective="binary:logistic"), control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+O_XGBFit <- fit(cluster ~ .,data = OHQ_baked_train, model = MODEL3)
+
+O_XGBres <- resample(cluster ~ .,data = OHQ_baked_train, model = MODEL3, control = Control)
+
+#summary(O_XGBres)
+#summary(O_XGBFit)
+```
+
+
+##### RESAMPLE  ######
+```{r}
+O_perf_res_XGB <- performance(
+  O_XGBres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  ),cutoff = 0.50
+)
+
+#summary(O_perf_res_XGB)
+```
+
+#####PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+
+#### Evaluate on the untouched 50% test set
+
+# Observed test outcomes
+obs_test3 <- response(O_XGBFit,newdata = OHQ_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test3 <- predict(O_XGBFit,newdata = OHQ_baked_test,type  = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test3 <- predict(O_XGBFit,newdata = OHQ_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance3 <- performance(obs_test3,pred_test3,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance3
+
+# Test-set confusion matrix
+table(Observed  = obs_test3,Predicted = class_test3)
+
+```
+
+        #####################################  RANDOM FOREST  ############################
+        
+        
+```{r}
+##Model tunning
+set.seed(123)
+MODEL4<- TunedModel(RandomForestModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+O_RANDFit <- fit(cluster ~ .,data = OHQ_baked_train, model = MODEL4)
+
+O_RANDres <- resample(cluster ~ .,data = OHQ_baked_train, model = MODEL4, control = Control)
+
+#summary(O_RANDFit)
+#summary(O_RANDres)
+```
+
+##### Random Forest RESAMPLE 
+```{r}
+O_perf_res_RAND <- performance(
+  O_RANDres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  )
+)
+
+#summary(O_perf_res_RAND)
+```
+
+#####Random Forest PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+#### Evaluate on the untouched 50% test set
+
+# Observed test outcomes
+obs_test4 <- response(O_RANDFit,newdata = OHQ_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test4 <- predict(O_RANDFit,newdata = OHQ_baked_test,type = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test4 <- predict(O_RANDFit,newdata = OHQ_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance4 <- performance(obs_test4,pred_test4,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance4
+
+# Test-set confusion matrix
+table(Observed  = obs_test4,Predicted = class_test4)
+
+```
+
+
+
+   #################################### Neural Net (Single layer)#########################
+
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL5<- TunedModel(NNetModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+O_NNETFit <- fit(cluster ~ .,data = OHQ_baked_train, model = MODEL5)
+
+O_NNETres <- resample(cluster ~ .,data = OHQ_baked_train, model = MODEL5, control = Control)
+
+#summary(O_NNETres)
+#summary(O_NNETFit)
+```
+
+####NEURAL NETWORK RESAMPLE
+```{r}
+O_perf_res_NNET <- performance(
+  O_NNETres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  )
+)
+
+#summary(O_perf_res_NNET)
+```
+
+## NEURAL NETWORK PERFORMANCE ASSESSMENT ON TESTSET
+```{r }
+
+#### Evaluate on the untouched 20% test set
+
+# Observed test outcomes
+obs_test5 <- response(O_NNETFit,newdata = OHQ_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test5 <- predict(O_NNETFit,newdata = OHQ_baked_test,type = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test5 <- predict(O_NNETFit,newdata = OHQ_baked_test,cutoff = 0.50)
+
+# Test-set metrics
+test_performance5 <- performance(obs_test5,pred_test5,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance5
+
+# Test-set confusion matrix
+table(Observed  = obs_test5,Predicted = class_test5)
+
+```
+
+
+
+
+```{r}
+##calibration
+calibrate.plot(obs_test3, pred_test3)
+```
+
+
+```{r}
+#install.packages("shapviz")
+#install.packages("fastshap",repos = c("https://bgreenwell.r-universe.dev", "https://cloud.r-project.org"))
+
+
+library(fastshap)
+library(shapviz)
+library(dplyr)
+library(ggplot2)
+
+```
+
+```{r}
+levels(OHQ_baked_train$cluster)
+```
+
+
+```{r}
+positive_class <- "NO"
+```
+
+
+```{r}
+X_train_XG <- OHQ_baked_train %>%
+  select(-cluster)
+
+X_test_XG <- OHQ_baked_test %>%
+  select(-cluster)
+```
+
+```{r}
+pred_wrapper_XG <- function(object, newdata) {
+  
+  pred <- predict(
+    object,
+    newdata = newdata,
+    type = "prob"
+  )
+  
+  # If predict() returns a matrix/data frame of probabilities
+  if (is.matrix(pred) || is.data.frame(pred)) {
+    
+    pred <- as.data.frame(pred)
+    
+    # Use YES column if it exists
+    if ("YES" %in% names(pred)) {
+      return(as.numeric(pred[["YES"]]))
+    }
+    
+    # Otherwise use probability for second factor level
+    return(as.numeric(pred[[2]]))
+  }
+  
+  # If MachineShop already returns probability of second level
+  return(as.numeric(pred))
+}
+```
+
+```{r}
+pred_wrapper_XG(
+  O_XGBFit,
+  X_test_XG[1:10, , drop = FALSE]
+)
+```
+
+
+```{r}
+set.seed(123)
+
+n_shap <- min(1000, nrow(X_test_XG))
+
+shap_index <- sample(
+  seq_len(nrow(X_test_XG)),
+  size = n_shap,
+  replace = FALSE
+)
+
+X_explain_XG <- X_test_XG[
+  shap_index,
+  ,
+  drop = FALSE
+]
+```
+
+```{r}
+set.seed(123)
+
+SHAP_LOG <- fastshap::explain(
+  object = O_XGBFit,
+  X = X_train_XG,
+  newdata = X_explain_XG,
+  pred_wrapper = pred_wrapper_XG,
+  nsim = 200,
+  adjust = TRUE
+)
+```
+
+```{r}
+SHAP_XG_matrix <- as.matrix(SHAP_XG)
+
+SHAP_XG_viz <- shapviz(
+  SHAP_LOG_matrix,
+  X = X_explain_XG
+)
+```
+
+
+```{r}
+sv_importance(
+  SHAP_XG_viz,
+  kind = "beeswarm",
+  max_display = 20
+)
+```
+
+
+```{r}
+SHAP_beeswarm_XG <- sv_importance(
+  SHAP_XG_viz,
+  kind = "beeswarm",
+  max_display = 20
+)
+
+ggsave(
+  "XGB_SHAP_Beeswarm.png",
+  plot = SHAP_beeswarm_XG,
+  width = 9,
+  height = 7,
+  dpi = 600
+)
+```
+
+```{r}
+sv_importance(
+  SHAP_XG_viz,
+  kind = "bar",
+  max_display = 20
+)
+
+
+
+##save it
+SHAP_bar_XG <- sv_importance(
+  SHAP_XG_viz,
+  kind = "bar",
+  max_display = 20
+)
+
+ggsave(
+  "XGB_SHAP_Global_Importance.png",
+  plot = SHAP_bar_XG,
+  width = 8,
+  height = 7,
+  dpi = 600
+)
+```
+
+
+
+```{r}
+SHAP_importance_XG <- data.frame(
+  Variable = colnames(SHAP_XG_matrix),
+  Mean_Absolute_SHAP = apply(
+    abs(SHAP_XG_matrix),
+    2,
+    mean,
+    na.rm = TRUE
+  )
+) %>%
+  arrange(desc(Mean_Absolute_SHAP))
+
+SHAP_importance_XG
+```
+

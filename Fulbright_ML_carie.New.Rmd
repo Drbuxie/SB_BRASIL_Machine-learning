@@ -1,0 +1,804 @@
+---
+title: 'Fulbright Machine Learning Project'
+author: "Dr. Chukwuebuka Ogwo"
+date: "5/20/2026"
+output:
+  
+---
+
+```{r setup, include=FALSE}
+#install.packages("tableone")
+#install.packages("xgboost")
+#install.packages("doParallel")
+library(magrittr)
+library(recipes)
+library(MachineShop)
+library(gbm)
+library(xgboost)
+library(doParallel)
+## Allocate cores for parallel processing
+registerDoParallel(cores = 6)
+```
+
+
+##Loading data
+```{r}
+## Load data and libraries
+setwd("/Users/user/OneDrive - Harvard University/FulBright/FulBright project")
+#setwd("/Users/cho379/OneDrive - Harvard University/FulBright/FulBright project")
+
+
+SBBrazil_caries <- read.csv("SBBrazil_FB2.csv")
+#SBBrazil_caries
+
+```
+
+```{r}
+
+SBBrazil_caries$codigo<- as.character(SBBrazil_caries$codigo)
+
+SBBrazil_caries0<- SBBrazil_caries[c(1,3,4,6:16)]
+
+SBBrazil_caries1<- SBBrazil_caries[c(1,2,5)]
+
+```
+
+
+##Recoding to appropriate variable type
+```{r}
+
+##convert the numeric variables to factor
+SBBrazil_caries0[sapply(SBBrazil_caries0, is.numeric)] <- lapply(SBBrazil_caries0[sapply(SBBrazil_caries0, is.numeric)], as.factor)
+
+#SBBrazil_caries0
+
+names(SBBrazil_caries0)
+```
+
+
+```{r}
+SBBrazil_caries<- merge(SBBrazil_caries1,SBBrazil_caries0, by = "codigo")
+#SBBrazil_caries
+
+```
+
+##Descriptive statistics for Caries
+```{r}
+library(tableone)
+
+#VARS <- c("internet","agua","sexo","cor_raca","escolaridade","utilizacao_servico","tipo_servico_utilizado", "motivo_consulta", "autoavaliacao_sb","smcat","PD_BOP_FINAL")
+
+VARS <- c("Internet_access","Water_supply","Sex","Race","Education","Dental_service_use","Type_of_service_used", "Reason_for_dental_visit", "Self_rated_oral_health","Minimum_wage_category","Periodontal_disease_status")
+
+#(Age,Household_members, Internet_access, Water_supply, Sex, Race, Education, Dental_service_use, Type_of_service_used, Reason_for_dental_visit, Self-rated_oral_health, Minimum_wage_category, Periodontal_disease_status, Caries_Status, OHRQoL)
+
+
+table1 <- CreateTableOne(vars = VARS, 
+                         strata = "Caries_Status", 
+                         data = SBBrazil_caries, 
+                         factorVars = VARS)
+
+print(table1, showAllLevels = TRUE)
+```
+
+
+```{r}
+summary(SBBrazil_caries$Age)
+summary(SBBrazil_caries$Household_members)
+
+t.test(Age~Caries_Status, data = SBBrazil_caries)
+t.test(Household_members~Caries_Status, data = SBBrazil_caries)
+```
+
+
+##### DATA PREPROCESSING FOR CARIES OUTCOME ######
+
+```{r}
+## Dataset splitting
+library(rsample)
+
+set.seed(123)
+
+SB_split <- initial_split(
+  SBBrazil_caries,
+  prop = 0.80,
+  strata = Caries_Status
+)
+
+C_trainset <- training(SB_split)
+C_testset  <- testing(SB_split)
+```
+
+
+
+```{r}
+### Data preprocessing using recipes package for caries
+
+carie_recipe <- recipe(Caries_Status ~ .,data = C_trainset) %>%
+    role_case(stratum = Caries_Status) %>%
+    step_rm(codigo,OHRQoL )%>%
+    check_missing(Caries_Status) %>%
+    step_filter_missing(all_predictors(),threshold = 0.50) %>%
+    step_nzv(all_predictors()) %>%
+    step_impute_knn(all_predictors())%>%
+    step_dummy(all_nominal_predictors()) %>%
+    #step_smote(cavitated_carious_lesions, over_ratio = 0.5, skip = TRUE) %>%
+    step_corr(all_numeric_predictors(), threshold = 0.9) %>%
+    step_normalize(all_numeric_predictors())
+    
+
+##prep the recipe
+    Carieprep <- prep(carie_recipe, training = C_trainset)
+    #Carieprep
+##Bake the prepped recipes for both trainset and testset
+    Carie_baked_train <- bake(Carieprep, new_data = C_trainset)
+    Carie_baked_test  <- bake(Carieprep, new_data = C_testset)
+
+#Carie_baked_train
+#Carie_baked_test
+
+```
+
+####CROSSVALIDATION  AND TUNNING#####
+
+```{r}
+##crossvalidation
+Control <- CVControl(folds = 5, seed = 123)
+```
+
+                ###########################Logistic regression##########################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL<- TunedModel(GLMModel(family = binomial), control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+C_LOGFit <- fit(Caries_Status ~ .,data = Carie_baked_train, model = MODEL)
+
+C_LOGres <- resample(Caries_Status ~ .,data = Carie_baked_train, model = MODEL, control = Control)
+
+#summary(C_LOGFit)
+#summary(C_LOGres)
+```
+
+##### RESAMPLE  ######
+```{r}
+C_perf_res_log <- performance(
+  C_LOGres,
+  metrics = c(
+    "ROC AUC"     = "roc_auc",
+    "PR AUC"      = "pr_auc",
+    "Brier Score" = "brier",
+    "Accuracy"    = "accuracy",
+    "Sensitivity" = "sensitivity",
+    "Specificity" = "specificity",
+    "PPV"         = "ppv",
+    "NPV"         = "npv",
+    "F1"          = "f_score"
+  )
+)
+
+#summary(C_perf_res_log)
+```
+
+##### PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+#### Evaluate on the untouched 50% test set
+
+# Observed test outcomes
+obs_test <- response(C_LOGFit,newdata = Carie_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test <- predict(C_LOGFit,newdata = Carie_baked_test,type = "prob")
+#pred_test
+
+# Predicted classes using the default cutoff of 0.50
+class_test <- predict(C_LOGFit,newdata = Carie_baked_test,cutoff  = 0.50)
+#class_test
+
+# Test-set metrics
+test_performance <- performance(obs_test,pred_test,
+  metrics = c(
+    "ROC AUC"     = "roc_auc",
+    "PR AUC"      = "pr_auc",
+    "Brier Score" = "brier",
+    "Accuracy"    = "accuracy",
+    "Sensitivity" = "sensitivity",
+    "Specificity" = "specificity",
+    "PPV"         = "ppv",
+    "NPV"         = "npv",
+    "F1"          = "f_score"
+    ),
+  cutoff = 0.50)
+
+test_performance
+
+# Test-set confusion matrix
+table(Observed  = obs_test,Predicted = class_test)
+
+```
+
+#################################### SHRINKAGE METHOD ######################################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL1<- TunedModel(GLMNetModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+C_SMFit <- fit(Caries_Status ~ .,data = Carie_baked_train, model = MODEL1)
+
+C_SMres <- resample(Caries_Status ~ .,data = Carie_baked_train, model = MODEL1, control = Control)
+
+#summary(C_SMFit)
+#summary(C_SMres)
+
+```
+
+##### RESAMPLE  ######
+```{r}
+C_perf_res_SM <- performance(
+  C_SMres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  )
+)
+
+#summary(C_perf_res_SM)
+```
+
+#####PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+
+#### Evaluate on the untouched 50% test set
+
+
+# Observed test outcomes
+obs_test1 <- response(C_SMFit,newdata = Carie_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test1 <- predict(C_SMFit,newdata = Carie_baked_test,type = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test1 <- predict(C_SMFit,newdata = Carie_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance1 <- performance(obs_test1,pred_test1,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance1
+
+# Test-set confusion matrix
+table(Observed  = obs_test1,Predicted = class_test1)
+
+```
+
+                ########################### Gradient Boosting Machine ######################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL2<- TunedModel(GBMModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+C_GBFit <- fit(Caries_Status ~ .,data = Carie_baked_train, model = MODEL2)
+
+C_GBres <- resample(Caries_Status ~ .,data = Carie_baked_train, model = MODEL2, control = Control)
+
+#summary(C_GBFit)
+#summary(C_GBres)
+```
+
+##### RESAMPLE  ######
+```{r}
+C_perf_res_GB <- performance(
+  C_GBres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  ),cutoff = 0.50
+)
+
+#summary(C_perf_res_GB)
+```
+
+#####PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+
+#### Evaluate on the untouched 20% test set
+
+# Observed test outcomes
+obs_test2 <- response(C_GBFit,newdata = Carie_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test2 <- predict(C_GBFit,newdata = Carie_baked_test,type  = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test2 <- predict(C_GBFit,newdata = Carie_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance2 <- performance(obs_test2,pred_test2,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance2
+
+# Test-set confusion matrix
+table(Observed  = obs_test2,Predicted = class_test2)
+
+```
+
+                ######################## XGBOOST ###################
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL3<- TunedModel(XGBLinearModel(objective="binary:logistic"), control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+C_XGBFit <- fit(Caries_Status ~ .,data = Carie_baked_train, model = MODEL3)
+
+C_XGBres <- resample(Caries_Status ~ .,data = Carie_baked_train, model = MODEL3, control = Control)
+
+#summary(C_XGBres)
+#summary(C_XGBFit)
+```
+
+
+##### RESAMPLE  ######
+```{r}
+C_perf_res_XGB <- performance(
+  C_XGBres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  ),cutoff = 0.50
+)
+
+#summary(C_perf_res_XGB)
+```
+
+#####PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+
+#### Evaluate on the untouched 50% test set
+
+# Observed test outcomes
+obs_test3 <- response(C_XGBFit,newdata = Carie_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test3 <- predict(C_XGBFit,newdata = Carie_baked_test,type  = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test3 <- predict(C_XGBFit,newdata = Carie_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance3 <- performance(obs_test3,pred_test3,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance3
+
+# Test-set confusion matrix
+table(Observed  = obs_test3,Predicted = class_test3)
+
+```
+
+        #####################################  RANDOM FOREST  ############################
+        
+        
+```{r}
+##Model tunning
+set.seed(123)
+MODEL4<- TunedModel(RandomForestModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+C_RANDFit <- fit(Caries_Status ~ .,data = Carie_baked_train, model = MODEL4)
+
+C_RANDres <- resample(Caries_Status ~ .,data = Carie_baked_train, model = MODEL4, control = Control)
+
+#summary(C_RANDFit)
+#summary(C_RANDres)
+```
+
+##### Random Forest RESAMPLE 
+```{r}
+C_perf_res_RAND <- performance(
+  C_RANDres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  )
+)
+
+#summary(C_perf_res_RAND)
+```
+
+#####Random Forest PERFORMANCE ASSESSMENT ON TESTSET ######
+```{r }
+#### Evaluate on the untouched 20% test set
+
+# Observed test outcomes
+obs_test4 <- response(C_RANDFit,newdata = Carie_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test4 <- predict(C_RANDFit,newdata = Carie_baked_test,type    = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test4 <- predict(C_RANDFit,newdata = Carie_baked_test,cutoff  = 0.50)
+
+# Test-set metrics
+test_performance4 <- performance(obs_test4,pred_test4,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance4
+
+# Test-set confusion matrix
+table(Observed  = obs_test4,Predicted = class_test4)
+
+```
+
+
+
+   #################################### Neural Net (Single layer)#########################
+
+
+```{r}
+##Model tunning
+set.seed(123)
+MODEL5<- TunedModel(NNetModel, control = Control)
+```
+
+
+```{r}
+### Model fitting 
+set.seed(123)
+
+C_NNETFit <- fit(Caries_Status ~ .,data = Carie_baked_train, model = MODEL5)
+
+C_NNETres <- resample(Caries_Status ~ .,data = Carie_baked_train, model = MODEL5, control = Control)
+
+summary(C_NNETres)
+summary(C_NNETFit)
+```
+
+####NEURAL NETWORK RESAMPLE
+```{r}
+C_perf_res_NNET <- performance(
+  C_NNETres,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Brier Score" = brier,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score
+  )
+)
+
+#summary(C_perf_res_NNET)
+```
+
+## NEURAL NETWORK PERFORMANCE ASSESSMENT ON TESTSET
+```{r }
+
+#### Evaluate on the untouched 20% test set
+
+# Observed test outcomes
+obs_test5 <- response(C_NNETFit,newdata = Carie_baked_test)
+
+# Predicted probability of the second factor level,which should be the positive class
+pred_test5 <- predict(C_NNETFit,newdata = Carie_baked_test,type = "prob")
+
+# Predicted classes using the default cutoff of 0.50
+class_test5 <- predict(C_NNETFit,newdata = Carie_baked_test,cutoff = 0.50)
+
+# Test-set metrics
+test_performance5 <- performance(obs_test5,pred_test5,
+  metrics = c(
+    "ROC AUC"     = roc_auc,
+    "PR AUC"      = pr_auc,
+    "Accuracy"    = accuracy,
+    "Sensitivity" = sensitivity,
+    "Specificity" = specificity,
+    "PPV"         = ppv,
+    "NPV"         = npv,
+    "F1"          = f_score,
+    "Brier Score" = brier),
+  cutoff = 0.50)
+
+test_performance5
+
+# Test-set confusion matrix
+table(Observed  = obs_test5,Predicted = class_test5)
+
+```
+
+
+```{r}
+##Variable importance 
+SB_car<- varimp(C_SMFit)
+View(SB_car)
+plot(SB_car)
+```
+
+
+
+```{r}
+##calibration
+calibrate.plot(obs_test1, pred_test1)
+```
+
+
+```{r}
+#install.packages("shapviz")
+install.packages(
+  "fastshap",
+  repos = c("https://bgreenwell.r-universe.dev", "https://cloud.r-project.org")
+)
+
+
+library(fastshap)
+library(shapviz)
+library(dplyr)
+library(ggplot2)
+
+```
+
+```{r}
+levels(Carie_baked_train$Caries_Status)
+```
+
+
+```{r}
+positive_class <- "YES"
+```
+
+
+```{r}
+X_train_SM <- Carie_baked_train %>%
+  select(-Caries_Status)
+
+X_test_SM <- Carie_baked_test %>%
+  select(-Caries_Status)
+```
+
+```{r}
+pred_wrapper_SM <- function(object, newdata) {
+  
+  pred <- predict(
+    object,
+    newdata = newdata,
+    type = "prob"
+  )
+  
+  # If predict() returns a matrix/data frame of probabilities
+  if (is.matrix(pred) || is.data.frame(pred)) {
+    
+    pred <- as.data.frame(pred)
+    
+    # Use YES column if it exists
+    if ("YES" %in% names(pred)) {
+      return(as.numeric(pred[["YES"]]))
+    }
+    
+    # Otherwise use probability for second factor level
+    return(as.numeric(pred[[2]]))
+  }
+  
+  # If MachineShop already returns probability of second level
+  return(as.numeric(pred))
+}
+```
+
+```{r}
+pred_wrapper_SM(
+  C_SMFit,
+  X_test_SM[1:10, , drop = FALSE]
+)
+```
+
+
+```{r}
+set.seed(123)
+
+n_shap <- min(1000, nrow(X_test_SM))
+
+shap_index <- sample(
+  seq_len(nrow(X_test_SM)),
+  size = n_shap,
+  replace = FALSE
+)
+
+X_explain_SM <- X_test_SM[
+  shap_index,
+  ,
+  drop = FALSE
+]
+```
+
+```{r}
+set.seed(123)
+
+SHAP_SM <- fastshap::explain(
+  object = C_SMFit,
+  X = X_train_SM,
+  newdata = X_explain_SM,
+  pred_wrapper = pred_wrapper_SM,
+  nsim = 200,
+  adjust = TRUE
+)
+```
+
+```{r}
+SHAP_SM_matrix <- as.matrix(SHAP_SM)
+
+SHAP_SM_viz <- shapviz(
+  SHAP_SM_matrix,
+  X = X_explain_SM
+)
+```
+
+
+```{r}
+sv_importance(
+  SHAP_SM_viz,
+  kind = "beeswarm",
+  max_display = 20
+)
+```
+
+
+```{r}
+SHAP_beeswarm_SM <- sv_importance(
+  SHAP_SM_viz,
+  kind = "beeswarm",
+  max_display = 20
+)
+
+ggsave(
+  "SM_SHAP_Beeswarm.png",
+  plot = SHAP_beeswarm_SM,
+  width = 9,
+  height = 7,
+  dpi = 600
+)
+```
+
+```{r}
+sv_importance(
+  SHAP_SM_viz,
+  kind = "bar",
+  max_display = 20
+)
+
+
+
+##save it
+SHAP_bar_SM <- sv_importance(
+  SHAP_SM_viz,
+  kind = "bar",
+  max_display = 20
+)
+
+ggsave(
+  "SM_SHAP_Global_Importance.png",
+  plot = SHAP_bar_SM,
+  width = 8,
+  height = 7,
+  dpi = 600
+)
+```
+
+
+
+```{r}
+SHAP_importance_SM <- data.frame(
+  Variable = colnames(SHAP_SM_matrix),
+  Mean_Absolute_SHAP = apply(
+    abs(SHAP_SM_matrix),
+    2,
+    mean,
+    na.rm = TRUE
+  )
+) %>%
+  arrange(desc(Mean_Absolute_SHAP))
+
+SHAP_importance_SM
+```
